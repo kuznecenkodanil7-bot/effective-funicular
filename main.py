@@ -170,6 +170,8 @@ def angle_between(a: pygame.Vector2, b: pygame.Vector2) -> float:
 class Game:
     def __init__(self) -> None:
         pygame.init()
+        # Отключаем автоповтор клавиш, чтобы Enter/Space не выбирали ответы много раз подряд.
+        pygame.key.set_repeat(0)
         pygame.display.set_caption("ПРОТОКОЛ: СОБЕСЕДНИК")
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
         self.clock = pygame.time.Clock()
@@ -199,6 +201,7 @@ class Game:
         self.refusal_count = 0
         self.tone = "нейтральный"
         self.transition_timer = 0.0
+        self.prologue_input_lock = 0.0
 
         self.world_w = 2400
         self.world_h = 1600
@@ -253,6 +256,7 @@ class Game:
         self.refusal_count = 0
         self.tone = "нейтральный"
         self.transition_timer = 0.0
+        self.prologue_input_lock = 0.0
         self.flash_timer = 0.0
         self.ephemeral_message = ""
         self.ephemeral_timer = 0.0
@@ -452,23 +456,32 @@ class Game:
                 self.display_lines = self.display_lines[-22:]
 
     def handle_prologue_key(self, key: int) -> None:
+        # Защита от ситуации, когда игрок зажал Enter/Space:
+        # раньше из-за этого один ответ мог добавляться в историю много раз подряд.
+        if self.prologue_input_lock > 0:
+            return
+
         if self.type_queue or self.current_typing:
-            # Enter/Space ускоряет печать текущего блока.
+            # Enter/Space ускоряет печать текущего блока, но НЕ выбирает следующий ответ
+            # в тот же момент. После пропуска ставим короткую блокировку ввода.
             if key in (pygame.K_RETURN, pygame.K_SPACE):
                 if self.current_typing:
                     self.display_lines[-1] += self.current_typing
                     self.current_typing = ""
                 while self.type_queue:
                     self.display_lines.append(self.type_queue.pop(0))
-                if len(self.display_lines) > 22:
-                    self.display_lines = self.display_lines[-22:]
+                if len(self.display_lines) > 18:
+                    self.display_lines = self.display_lines[-18:]
+                self.prologue_input_lock = 0.22
             return
 
         node = self.prologue_nodes[self.node_index]
         if key in (pygame.K_UP, pygame.K_w):
             self.choice_index = (self.choice_index - 1) % len(node.choices)
+            self.prologue_input_lock = 0.08
         elif key in (pygame.K_DOWN, pygame.K_s):
             self.choice_index = (self.choice_index + 1) % len(node.choices)
+            self.prologue_input_lock = 0.08
         elif key in (pygame.K_1, pygame.K_KP1):
             self.choice_index = 0
             self.choose_prologue()
@@ -485,6 +498,9 @@ class Game:
         node = self.prologue_nodes[self.node_index]
         choice = node.choices[self.choice_index]
         self.display_lines.append(f"> {choice.text}")
+        if len(self.display_lines) > 18:
+            self.display_lines = self.display_lines[-18:]
+        self.prologue_input_lock = 0.25
         if choice.action:
             choice.action(self)
             return
@@ -580,6 +596,7 @@ class Game:
 
     def update(self, dt: float) -> None:
         self.flash_timer = max(0.0, self.flash_timer - dt)
+        self.prologue_input_lock = max(0.0, self.prologue_input_lock - dt)
         self.noise_timer += dt
         if self.ephemeral_timer > 0:
             self.ephemeral_timer -= dt
@@ -822,21 +839,45 @@ class Game:
             pygame.draw.line(self.screen, (0, 30, 15), (0, y), (WIDTH, y))
         pygame.draw.rect(self.screen, COLORS["green_dim"], (38, 34, WIDTH - 76, HEIGHT - 68), 2)
         self.text.draw(self.screen, "ПРОТОКОЛ: СОБЕСЕДНИК", (54, 48), self.text.console_big, COLORS["console_green"])
-        y = 112
-        for line in self.display_lines[-20:]:
-            y = self.text.draw_wrapped(self.screen, line, 58, y, self.text.console, COLORS["console_green"], WIDTH - 116, 2)
-        if self.current_typing:
-            self.text.draw(self.screen, "_", (58 + random.randint(0, 4), y), self.text.console, COLORS["console_green"])
+
+        # История диалога теперь рисуется в отдельной области.
+        # Нижняя часть экрана зарезервирована только под варианты ответа.
+        message_rect = pygame.Rect(54, 104, WIDTH - 108, HEIGHT - 325)
+        old_clip = self.screen.get_clip()
+        self.screen.set_clip(message_rect)
+        y = message_rect.y
+        for line in self.display_lines[-13:]:
+            y = self.text.draw_wrapped(
+                self.screen,
+                line,
+                message_rect.x,
+                y,
+                self.text.console,
+                COLORS["console_green"],
+                message_rect.width,
+                2,
+            )
+            if y > message_rect.bottom - 24:
+                break
+        if self.current_typing and y < message_rect.bottom - 24:
+            self.text.draw(self.screen, "_", (message_rect.x + random.randint(0, 4), y), self.text.console, COLORS["console_green"])
+        self.screen.set_clip(old_clip)
 
         if not self.type_queue and not self.current_typing:
             node = self.prologue_nodes[self.node_index]
-            choice_y = HEIGHT - 170
+            panel = pygame.Rect(54, HEIGHT - 205, WIDTH - 108, 148)
+            pygame.draw.rect(self.screen, COLORS["console_bg"], panel)
+            pygame.draw.rect(self.screen, COLORS["green_dim"], panel, 1)
+            choice_y = panel.y + 16
             for i, choice in enumerate(node.choices):
                 color = COLORS["yellow"] if i == self.choice_index else COLORS["console_green"]
                 prefix = ">" if i == self.choice_index else " "
-                self.text.draw(self.screen, f"{prefix} {i + 1}. {choice.text}", (70, choice_y), self.text.console, color)
+                self.text.draw(self.screen, f"{prefix} {i + 1}. {choice.text}", (panel.x + 18, choice_y), self.text.console, color)
                 choice_y += 34
             self.text.draw(self.screen, "1/2/3 или Enter — выбрать. Space — пропустить печать.",
+                           (70, HEIGHT - 42), self.text.small, COLORS["green_dim"])
+        else:
+            self.text.draw(self.screen, "Space/Enter — допечатать сообщение.",
                            (70, HEIGHT - 42), self.text.small, COLORS["green_dim"])
 
         self.draw_noise_overlay(alpha=35)
